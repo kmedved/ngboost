@@ -57,6 +57,30 @@ print('Test NLL', test_NLL)
 
 Details on available distributions, scoring rules, learners, tuning, and model interpretation are available in our [user guide](https://stanfordmlgroup.github.io/ngboost/intro.html), which also includes numerous usage examples and information on how to add new distributions or scores to NGBoost.
 
+## Benchmarks
+
+The repo includes a local benchmark suite under `benchmarks/` for comparing speed and predictive quality across NGBoost variants.
+
+```sh
+conda run -n darko311 python -m pip install poetry==2.0.1
+conda run -n darko311 poetry install --with bench
+conda run -n darko311 poetry run python -m benchmarks.run --suite short --part all --no-show-plots
+```
+
+Default runs use offline-core datasets only and write CSVs, plots, and an environment manifest under `results/benchmarks/<timestamp>/`.
+
+Useful commands:
+
+```sh
+make bench
+make bench-full
+make bench-extended
+```
+
+`bench-extended` enables CaliforniaHousing and OpenML datasets, which require network access. You can also restrict runs with `--methods`, `--datasets`, or `--configs`.
+
+For Colab-based benchmark testing, see [this notebook](https://colab.research.google.com/drive/1ZoXh8Y-SFuk93iM7yQWK_82a1g5t36Bj#scrollTo=mma8iKMqCCdl).
+
 ## License
 
 [Apache License 2.0](https://github.com/stanfordmlgroup/ngboost/blob/master/LICENSE).

@@ -113,3 +113,4 @@ venv.bak/
 
 .DS_Store
 poetry.lock
+results/benchmarks/
