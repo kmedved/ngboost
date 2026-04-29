@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import math
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -180,6 +181,72 @@ def _resolve_validation_aliases(x_val, y_val, kwargs):
         unexpected = ", ".join(sorted(kwargs))
         raise TypeError(f"unexpected keyword argument(s): {unexpected}")
     return x_val, y_val
+
+
+def _prepare_validation_data(
+    estimator,
+    x,
+    y,
+    sample_weight,
+    val_sample_weight,
+    x_val,
+    y_val,
+    early_stopping_rounds,
+):
+    """Mirror NGBoost validation splitting for custom benchmark fit loops."""
+
+    if early_stopping_rounds is None:
+        early_stopping_rounds = estimator.early_stopping_rounds
+
+    if early_stopping_rounds is None:
+        return x, y, sample_weight, val_sample_weight, x_val, y_val, None
+
+    if x_val is None and y_val is None:
+        if sample_weight is None:
+            x, x_val, y, y_val = train_test_split(
+                x,
+                y,
+                test_size=estimator.validation_fraction,
+                random_state=estimator.random_state,
+            )
+        else:
+            (
+                x,
+                x_val,
+                y,
+                y_val,
+                sample_weight,
+                val_sample_weight,
+            ) = train_test_split(
+                x,
+                y,
+                sample_weight,
+                test_size=estimator.validation_fraction,
+                random_state=estimator.random_state,
+            )
+    elif x_val is not None and y_val is not None:
+        if sample_weight is not None and val_sample_weight is None:
+            raise ValueError(
+                "Training data has sample weights but validation data is missing them"
+            )
+        if sample_weight is None and val_sample_weight is not None:
+            raise ValueError(
+                "sample weights mismatch between training and validation data"
+            )
+    else:
+        raise ValueError(
+            "Inconsistent validation data: either x_val or y_val is missing"
+        )
+
+    return x, y, sample_weight, val_sample_weight, x_val, y_val, early_stopping_rounds
+
+
+def _should_stop_early(val_loss_list, best_val_loss, early_stopping_rounds):
+    return (
+        early_stopping_rounds is not None
+        and len(val_loss_list) > early_stopping_rounds
+        and best_val_loss < np.min(np.array(val_loss_list[-early_stopping_rounds:]))
+    )
 
 
 def get_mvn_class(k: int):
@@ -710,8 +777,32 @@ def _verify_scale_on_full_data(self, resids, start, y, sample_weight, scale):
             )
             if np.isfinite(loss1) and loss1 <= loss0:
                 break
+        if (not np.isfinite(loss1)) or (loss1 > loss0):
+            scale = 0.0
         self.scalings[-1] = scale
     return self.scalings[-1]
+
+
+def _loss_checked_scale(
+    self,
+    resids,
+    start,
+    y,
+    sample_weight,
+    scale,
+    loss_init,
+    *,
+    max_extra_down=20,
+):
+    """Return a step scale that is proven not to increase loss."""
+
+    scale = min(float(scale), 256.0)
+    for _ in range(max_extra_down + 1):
+        loss = self.Manifold((start - resids * scale).T).total_score(y, sample_weight)
+        if np.isfinite(loss) and loss <= loss_init:
+            return scale
+        scale *= 0.5
+    return 0.0
 
 
 def _line_search_core(
@@ -743,7 +834,16 @@ def _line_search_core(
             break
         scale *= 0.5
 
-    scale = min(scale, 256.0)
+    scale = _loss_checked_scale(
+        self,
+        resids,
+        start,
+        y,
+        sample_weight,
+        scale,
+        loss_init,
+        max_extra_down=getattr(self, "_ls_max_extra_down", 20),
+    )
     self.scalings.append(scale)
     return scale
 
@@ -1154,6 +1254,16 @@ def _armijo_line_search(self, resids, start, y, sample_weight=None, scale_init=1
         if np.isfinite(loss) and loss < loss_init:
             break
 
+    scale = _loss_checked_scale(
+        self,
+        resids,
+        start,
+        y,
+        sample_weight,
+        scale,
+        loss_init,
+        max_extra_down=getattr(self, "_armijo_max_extra_down", 20),
+    )
     self.scalings.append(scale)
     return scale
 
@@ -1255,7 +1365,7 @@ if XGB_MODULE is not None:
     class XGBoostMultiOutputEstimator(BaseEstimator, RegressorMixin):
         """XGBoost hist tree with `multi_output_tree` strategy."""
 
-        def __init__(self, max_depth=3, learning_rate=1.0, n_jobs=4):
+        def __init__(self, max_depth=3, learning_rate=1.0, n_jobs=None):
             self.max_depth = max_depth
             self.learning_rate = learning_rate
             self.n_jobs = n_jobs
@@ -1269,7 +1379,11 @@ if XGB_MODULE is not None:
                 "objective": "reg:squarederror",
                 "max_depth": self.max_depth,
                 "eta": self.learning_rate,
-                "n_jobs": self.n_jobs,
+                "n_jobs": (
+                    self.n_jobs
+                    if self.n_jobs is not None
+                    else int(os.environ.get("OMP_NUM_THREADS", "4"))
+                ),
                 "verbosity": 0,
                 "seed": GLOBAL_SEED,
             }
@@ -1288,17 +1402,70 @@ if LGB_MODULE is not None:
     class LightGBMPersistentNGBRegressor(NGBRegressor):
         """LightGBM hist trees that reuse a binned Dataset across iterations."""
 
-        def fit(self, x, y, **kwargs):
+        def fit(
+            self,
+            x,
+            y,
+            x_val=None,
+            y_val=None,
+            sample_weight=None,
+            val_sample_weight=None,
+            train_loss_monitor=None,
+            val_loss_monitor=None,
+            early_stopping_rounds=None,
+            **kwargs,
+        ):
+            x_val, y_val = _resolve_validation_aliases(x_val, y_val, kwargs)
+            (
+                x,
+                y,
+                sample_weight,
+                val_sample_weight,
+                x_val,
+                y_val,
+                early_stopping_rounds,
+            ) = _prepare_validation_data(
+                self,
+                x,
+                y,
+                sample_weight,
+                val_sample_weight,
+                x_val,
+                y_val,
+                early_stopping_rounds,
+            )
+
             x, y = _check_xy(x, y)
+            if x_val is not None and y_val is not None:
+                x_val, y_val = _check_xy(x_val, y_val)
             self.base_models = []
             self.scalings = []
             self.col_idxs = []
+            self.best_val_loss_itr = None
             self.fit_init_params_to_marginal(y)
             params = self.pred_param(x)
+            if x_val is not None and y_val is not None:
+                val_params = self.pred_param(x_val)
+                val_loss_list = []
+                best_val_loss = np.inf
+
+            if not train_loss_monitor:
+                train_loss_monitor = (
+                    lambda manifold_batch, y_batch, weights: manifold_batch.total_score(
+                        y_batch, sample_weight=weights
+                    )
+                )
+            if not val_loss_monitor:
+                val_loss_monitor = (
+                    lambda manifold_batch, y_batch: manifold_batch.total_score(
+                        y_batch, sample_weight=val_sample_weight
+                    )
+                )
 
             self._train_ds = LGB_MODULE.Dataset(
                 x,
                 label=y if y.ndim == 1 else y[:, 0],
+                weight=sample_weight,
                 free_raw_data=False,
                 params={"verbose": -1},
             )
@@ -1314,16 +1481,23 @@ if LGB_MODULE is not None:
                 "feature_fraction": 1.0,
                 "lambda_l1": 0.0,
                 "lambda_l2": 0.0,
-                "num_threads": 4,
+                "num_threads": int(os.environ.get("OMP_NUM_THREADS", "4")),
                 "seed": GLOBAL_SEED,
             }
 
-            for _ in range(self.n_estimators):
+            loss_list = []
+            for itr in range(self.n_estimators):
                 manifold_batch = self.Manifold(params.T)
+                loss_list.append(train_loss_monitor(manifold_batch, y, sample_weight))
                 grads = manifold_batch.grad(y, natural=self.natural_gradient)
 
                 layer_models = []
                 layer_preds = np.zeros_like(grads)
+                val_layer_preds = (
+                    np.zeros((x_val.shape[0], grads.shape[1]))
+                    if x_val is not None and y_val is not None
+                    else None
+                )
                 for k in range(grads.shape[1]):
                     self._train_ds.set_label(grads[:, k])
                     booster = LGB_MODULE.train(
@@ -1331,11 +1505,28 @@ if LGB_MODULE is not None:
                     )
                     layer_models.append(booster)
                     layer_preds[:, k] = booster.predict(x)
+                    if val_layer_preds is not None:
+                        val_layer_preds[:, k] = booster.predict(x_val)
 
                 self.base_models.append(layer_models)
                 self.col_idxs.append(np.arange(x.shape[1]))
-                scale = self.line_search(layer_preds, params, y)
+                scale = self.line_search(layer_preds, params, y, sample_weight)
                 params -= self.learning_rate * scale * layer_preds
+
+                if val_layer_preds is not None:
+                    val_params -= self.learning_rate * scale * val_layer_preds
+                    val_loss = val_loss_monitor(self.Manifold(val_params.T), y_val)
+                    val_loss_list.append(val_loss)
+                    if val_loss < best_val_loss:
+                        best_val_loss, self.best_val_loss_itr = val_loss, itr
+                    if _should_stop_early(
+                        val_loss_list, best_val_loss, early_stopping_rounds
+                    ):
+                        break
+
+            self.evals_result = {"train": {self.Score.__name__.upper(): loss_list}}
+            if x_val is not None and y_val is not None:
+                self.evals_result["val"] = {self.Score.__name__.upper(): val_loss_list}
             return self
 
         def pred_param(self, x, max_iter=None):
@@ -1557,9 +1748,44 @@ class PreBinnedNumbaNGBRegressor(FastMO_FixedStepNGBRegressor):
             )
         return x_binned
 
-    def fit(self, x, y, **kwargs):
+    def fit(
+        self,
+        x,
+        y,
+        x_val=None,
+        y_val=None,
+        sample_weight=None,
+        val_sample_weight=None,
+        train_loss_monitor=None,
+        val_loss_monitor=None,
+        early_stopping_rounds=None,
+        **kwargs,
+    ):
+        x_val, y_val = _resolve_validation_aliases(x_val, y_val, kwargs)
+        (
+            x,
+            y,
+            sample_weight,
+            val_sample_weight,
+            x_val,
+            y_val,
+            early_stopping_rounds,
+        ) = _prepare_validation_data(
+            self,
+            x,
+            y,
+            sample_weight,
+            val_sample_weight,
+            x_val,
+            y_val,
+            early_stopping_rounds,
+        )
+
         x, y = _check_xy(x, y)
         x = self._to_dense(x)
+        if x_val is not None and y_val is not None:
+            x_val, y_val = _check_xy(x_val, y_val)
+            x_val = self._to_dense(x_val)
 
         self.n_bins = 32
         self.bin_edges_ = []
@@ -1571,25 +1797,66 @@ class PreBinnedNumbaNGBRegressor(FastMO_FixedStepNGBRegressor):
             )
             self.bin_edges_.append(edges)
             self.x_binned[:, feature] = np.searchsorted(edges, x[:, feature])
+        x_val_binned = (
+            self._bin_x(x_val) if x_val is not None and y_val is not None else None
+        )
 
         self.base_models = []
         self.scalings = []
         self.col_idxs = []
+        self.best_val_loss_itr = None
         self.fit_init_params_to_marginal(y)
         params = self._pred_binned(self.x_binned)
+        if x_val_binned is not None:
+            val_params = self._pred_binned(x_val_binned)
+            val_loss_list = []
+            best_val_loss = np.inf
 
-        for _ in range(self.n_estimators):
+        if not train_loss_monitor:
+            train_loss_monitor = (
+                lambda manifold_batch, y_batch, weights: manifold_batch.total_score(
+                    y_batch, sample_weight=weights
+                )
+            )
+        if not val_loss_monitor:
+            val_loss_monitor = (
+                lambda manifold_batch, y_batch: manifold_batch.total_score(
+                    y_batch, sample_weight=val_sample_weight
+                )
+            )
+
+        loss_list = []
+        for itr in range(self.n_estimators):
             manifold_batch = self.Manifold(params.T)
+            loss_list.append(train_loss_monitor(manifold_batch, y, sample_weight))
             grads = manifold_batch.grad(y, natural=self.natural_gradient)
             model = NGBoostTree(max_depth=3, n_bins=self.n_bins)
-            model.fit(self.x_binned, grads)
+            model.fit(self.x_binned, grads, sample_weight=sample_weight)
             fitted = model.predict_cached()
             self.base_models.append([model])
             self.col_idxs.append(np.arange(x.shape[1]))
             direction = self._transform_stage_pred(fitted)
-            scale = self.line_search(direction, params, y)
+            scale = self.line_search(direction, params, y, sample_weight)
             delta = self._compute_delta(direction, scale)
             self._apply_update(params, delta)
+
+            if x_val_binned is not None:
+                stage_pred_val = model.predict(x_val_binned)
+                direction_val = self._transform_stage_pred(stage_pred_val)
+                val_delta = self._compute_delta(direction_val, scale)
+                self._apply_update(val_params, val_delta)
+                val_loss = val_loss_monitor(self.Manifold(val_params.T), y_val)
+                val_loss_list.append(val_loss)
+                if val_loss < best_val_loss:
+                    best_val_loss, self.best_val_loss_itr = val_loss, itr
+                if _should_stop_early(
+                    val_loss_list, best_val_loss, early_stopping_rounds
+                ):
+                    break
+
+        self.evals_result = {"train": {self.Score.__name__.upper(): loss_list}}
+        if x_val_binned is not None:
+            self.evals_result["val"] = {self.Score.__name__.upper(): val_loss_list}
         return self
 
     def _pred_binned(self, x_binned, max_iter=None):
@@ -1637,7 +1904,7 @@ HIST_BASE = HistGradientBoostingRegressor(
     random_state=GLOBAL_SEED,
 )
 XGB_BASE = (
-    XGBoostMultiOutputEstimator(max_depth=3, learning_rate=1.0, n_jobs=4)
+    XGBoostMultiOutputEstimator(max_depth=3, learning_rate=1.0)
     if XGBoostMultiOutputEstimator is not None
     else None
 )
@@ -1656,6 +1923,7 @@ HYPER_CONFIGS = [
 
 UNI_EXPERIMENTS = [
     ("Baseline", NGBRegressor, {}),
+    ("FN:Baseline", NGBRegressor, {"Dist": FastNormal, "Score": FastNormalLogScore}),
     ("Baseline (NoNatGrad)", NGBRegressor, {"natural_gradient": False}),
     ("Baseline+DiagNG", DiagonalNGBRegressor, {}),
     ("Baseline+GlobalNG", GlobalNGBRegressor, {}),
@@ -1667,6 +1935,11 @@ UNI_EXPERIMENTS = [
     ("NoCopy+CappedLS", NoCopy_CappedLSNGBRegressor, {}),
     ("HybridLS(sub+cap)", HybridLSNGBRegressor, {}),
     ("MO", FastMultiOutputNGBRegressor, {}),
+    (
+        "FN:MO",
+        FastMultiOutputNGBRegressor,
+        {"Dist": FastNormal, "Score": FastNormalLogScore},
+    ),
     ("MO (NoNatGrad)", FastMultiOutputNGBRegressor, {"natural_gradient": False}),
     ("MO+DiagNG", FastMO_DiagNGBRegressor, {}),
     ("MO+FixedStep", FastMO_FixedStepNGBRegressor, {}),
@@ -1675,6 +1948,11 @@ UNI_EXPERIMENTS = [
     ("MO+CappedLS", FastMO_CappedLSNGBRegressor, {}),
     ("MO+HybridLS", FastMO_HybridLSNGBRegressor, {}),
     ("MO+GradNorm", FastMO_GradNormNGBRegressor, {}),
+    (
+        "FN:MO+GradNorm",
+        FastMO_GradNormNGBRegressor,
+        {"Dist": FastNormal, "Score": FastNormalLogScore},
+    ),
     ("MO+GradNorm(a=1.0)", FastMO_GradNormNGBRegressor, {"grad_norm_alpha": 1.0}),
     ("MO+GradNorm(a=0.3)", FastMO_GradNormNGBRegressor, {"grad_norm_alpha": 0.3}),
     ("MO+GradNorm+FixedStep", FastMO_GradNorm_FixedStepNGBRegressor, {}),
@@ -1707,6 +1985,12 @@ UNI_EXPERIMENTS = [
     ("LightGBM+FixedStep", LightGBM_FixedStepNGBRegressor, {}, "lightgbm"),
     ("LightGBM+CappedLS", LightGBM_CappedLSNGBRegressor, {}, "lightgbm"),
     ("PreBinnedNumba+FixedStep", PreBinnedNumbaNGBRegressor, {}, "numba"),
+    (
+        "FN:PreBinnedNumba+FixedStep",
+        PreBinnedNumbaNGBRegressor,
+        {"Dist": FastNormal, "Score": FastNormalLogScore},
+        "numba",
+    ),
 ]
 
 BIGK_EXPERIMENTS = [

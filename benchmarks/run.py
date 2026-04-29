@@ -100,6 +100,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip the internal benchmark structural smoke test.",
     )
     parser.add_argument(
+        "--randomize-method-order",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Randomize method order deterministically within each benchmark cell/trial.",
+    )
+    parser.add_argument(
+        "--order-seed",
+        type=int,
+        default=42,
+        help="Seed used for deterministic method-order randomization.",
+    )
+    parser.add_argument(
+        "--resplit-trials",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Create a fresh train/test split or synthetic BigK draw for each trial.",
+    )
+    parser.add_argument(
         "--quiet",
         action="store_true",
         help="Reduce benchmark progress logging.",
@@ -125,6 +143,9 @@ def main(argv: list[str] | None = None) -> dict[str, object]:
         selected_configs=_parse_csv_set(args.configs),
         run_structural_smoke=not args.skip_structural_smoke,
         verbose=not args.quiet,
+        randomize_method_order=args.randomize_method_order,
+        order_seed=args.order_seed,
+        resplit_trials=args.resplit_trials,
     )
 
     try:

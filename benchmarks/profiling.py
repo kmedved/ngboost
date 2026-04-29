@@ -16,6 +16,12 @@ from benchmarks.variants import (
 )
 
 
+def _select_profile_experiments(experiments, selected_methods: set[str] | None):
+    if selected_methods is None:
+        return list(experiments)
+    return [spec for spec in experiments if spec.name in selected_methods]
+
+
 def profile_fit(estimator_cls, fit_kwargs, x_train, y_train):
     """Collect cProfile stats for one estimator fit."""
 
@@ -100,6 +106,7 @@ def run_profiling(
     datasets: dict[str, tuple],
     *,
     backend_statuses=None,
+    selected_methods: set[str] | None = None,
     output_path: str | Path | None = None,
     verbose: bool = True,
 ) -> pd.DataFrame:
@@ -117,7 +124,12 @@ def run_profiling(
 
     rows = []
     hyper_config = {"n_estimators": 200, "learning_rate": 0.05}
-    experiments = get_profile_experiments(backend_statuses=backend_statuses)
+    experiments = _select_profile_experiments(
+        get_profile_experiments(backend_statuses=backend_statuses),
+        selected_methods,
+    )
+    if not experiments:
+        return pd.DataFrame()
 
     for dataset_name, (x_train, _x_test, y_train, _y_test) in profile_datasets.items():
         if verbose:
