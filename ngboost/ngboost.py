@@ -5,6 +5,7 @@
 # pylint: disable=unused-variable,invalid-unary-operand-type,attribute-defined-outside-init
 # pylint: disable=redundant-keyword-arg,protected-access,unnecessary-lambda-assignment
 import numpy as np
+from joblib import Parallel, delayed
 from sklearn.base import clone
 from sklearn.model_selection import train_test_split
 from sklearn.tree import DecisionTreeRegressor
@@ -46,6 +47,12 @@ class NGBoost:
                                     loss has to increase before the algorithm stops early.
                                     Set to None to disable early stopping and validation.
                                     None enables running over the full data set.
+        fit_base_mode     : how to fit per-parameter base learners. "separate" preserves
+                            the historical serial fit. "parallel_separate" fits the same
+                            per-parameter learners concurrently.
+        n_jobs_fit        : number of jobs to use when fit_base_mode="parallel_separate".
+        line_search_strategy: "standard" preserves the historical full line search.
+                              "capped" uses a bounded loss-checked line search.
 
 
     Output:
@@ -69,6 +76,11 @@ class NGBoost:
         random_state=None,
         validation_fraction=0.1,
         early_stopping_rounds=None,
+        fit_base_mode="separate",
+        n_jobs_fit=None,
+        line_search_strategy="standard",
+        line_search_max_up=2,
+        line_search_max_down=3,
     ):
         self.Dist = Dist
         self.Score = Score
@@ -91,11 +103,19 @@ class NGBoost:
         self.best_val_loss_itr = None
         self.validation_fraction = validation_fraction
         self.early_stopping_rounds = early_stopping_rounds
+        self.fit_base_mode = fit_base_mode
+        self.n_jobs_fit = n_jobs_fit
+        self.line_search_strategy = line_search_strategy
+        self.line_search_max_up = line_search_max_up
+        self.line_search_max_down = line_search_max_down
 
         if hasattr(self.Dist, "multi_output"):
             self.multi_output = self.Dist.multi_output
         else:
             self.multi_output = False
+
+        self._validate_fit_base_mode()
+        self._validate_line_search_strategy()
 
     def __getstate__(self):
         state = self.__dict__.copy()
@@ -118,6 +138,11 @@ class NGBoost:
                 state_dict["K"]
             )
         state_dict["Manifold"] = manifold(state_dict["Score"], state_dict["Dist"])
+        state_dict.setdefault("fit_base_mode", "separate")
+        state_dict.setdefault("n_jobs_fit", None)
+        state_dict.setdefault("line_search_strategy", "standard")
+        state_dict.setdefault("line_search_max_up", 2)
+        state_dict.setdefault("line_search_max_down", 3)
         self.__dict__ = state_dict
 
     def fit_init_params_to_marginal(self, Y, sample_weight=None, iters=1000):
@@ -167,19 +192,68 @@ class NGBoost:
             params[idxs, :],
         )
 
-    def fit_base(self, X, grads, sample_weight=None):
+    def _validate_fit_base_mode(self):
+        if self.fit_base_mode not in ("separate", "parallel_separate"):
+            raise ValueError(
+                "fit_base_mode must be one of {'separate', 'parallel_separate'}"
+            )
+
+    def _validate_line_search_strategy(self):
+        if self.line_search_strategy not in ("standard", "capped"):
+            raise ValueError(
+                "line_search_strategy must be one of {'standard', 'capped'}"
+            )
+
+    def _fit_one_base_model(self, X, grad, sample_weight=None):
+        model = clone(self.Base)
         if sample_weight is None:
-            models = [clone(self.Base).fit(X, g) for g in grads.T]
+            return model.fit(X, grad)
+        return model.fit(X, grad, sample_weight=sample_weight)
+
+    def fit_base(self, X, grads, sample_weight=None):
+        self._validate_fit_base_mode()
+        if sample_weight is None:
+            if self.fit_base_mode == "parallel_separate":
+                models = Parallel(n_jobs=self.n_jobs_fit, prefer="threads")(
+                    delayed(self._fit_one_base_model)(X, g) for g in grads.T
+                )
+            else:
+                models = [self._fit_one_base_model(X, g) for g in grads.T]
         else:
-            models = [
-                clone(self.Base).fit(X, g, sample_weight=sample_weight) for g in grads.T
-            ]
+            if self.fit_base_mode == "parallel_separate":
+                models = Parallel(n_jobs=self.n_jobs_fit, prefer="threads")(
+                    delayed(self._fit_one_base_model)(X, g, sample_weight)
+                    for g in grads.T
+                )
+            else:
+                models = [
+                    self._fit_one_base_model(X, g, sample_weight) for g in grads.T
+                ]
         fitted = np.array([m.predict(X) for m in models]).T
         self.base_models.append(models)
         return fitted
 
     # pylint: disable=too-many-positional-arguments
     def line_search(self, resids, start, Y, sample_weight=None, scale_init=1):
+        self._validate_line_search_strategy()
+        if self.line_search_strategy == "capped":
+            return self._capped_line_search(
+                resids,
+                start,
+                Y,
+                sample_weight=sample_weight,
+                scale_init=scale_init,
+            )
+        return self._standard_line_search(
+            resids,
+            start,
+            Y,
+            sample_weight=sample_weight,
+            scale_init=scale_init,
+        )
+
+    # pylint: disable=too-many-positional-arguments
+    def _standard_line_search(self, resids, start, Y, sample_weight=None, scale_init=1):
         D_init = self.Manifold(start.T)
         loss_init = D_init.total_score(Y, sample_weight)
         scale = scale_init
@@ -205,6 +279,61 @@ class NGBoost:
             if np.isfinite(loss) and loss < loss_init:
                 break
             scale = scale * 0.5
+        self.scalings.append(scale)
+        return scale
+
+    def _loss_checked_scale(
+        self,
+        resids,
+        start,
+        Y,
+        sample_weight,
+        scale,
+        loss_init,
+        max_extra_down=20,
+    ):
+        scale = min(float(scale), 256.0)
+        for _ in range(max_extra_down + 1):
+            D = self.Manifold((start - resids * scale).T)
+            loss = D.total_score(Y, sample_weight)
+            if np.isfinite(loss) and loss <= loss_init:
+                return scale
+            scale *= 0.5
+        return 0.0
+
+    # pylint: disable=too-many-positional-arguments
+    def _capped_line_search(self, resids, start, Y, sample_weight=None, scale_init=1):
+        D_init = self.Manifold(start.T)
+        loss_init = D_init.total_score(Y, sample_weight)
+        scale = scale_init
+
+        for _ in range(self.line_search_max_up):
+            scaled_resids = resids * scale
+            D = self.Manifold((start - scaled_resids).T)
+            loss = D.total_score(Y, sample_weight)
+            if not np.isfinite(loss) or loss > loss_init or scale > 256:
+                break
+            scale = scale * 2
+
+        for _ in range(self.line_search_max_down):
+            scaled_resids = resids * scale
+            D = self.Manifold((start - scaled_resids).T)
+            loss = D.total_score(Y, sample_weight)
+            norm = np.mean(np.linalg.norm(scaled_resids, axis=1))
+            if norm < self.tol:
+                break
+            if np.isfinite(loss) and loss < loss_init:
+                break
+            scale = scale * 0.5
+
+        scale = self._loss_checked_scale(
+            resids,
+            start,
+            Y,
+            sample_weight,
+            scale,
+            loss_init,
+        )
         self.scalings.append(scale)
         return scale
 
@@ -518,6 +647,11 @@ class NGBoost:
             "random_state": self.random_state,
             "validation_fraction": self.validation_fraction,
             "early_stopping_rounds": self.early_stopping_rounds,
+            "fit_base_mode": self.fit_base_mode,
+            "n_jobs_fit": self.n_jobs_fit,
+            "line_search_strategy": self.line_search_strategy,
+            "line_search_max_up": self.line_search_max_up,
+            "line_search_max_down": self.line_search_max_down,
         }
 
         return params

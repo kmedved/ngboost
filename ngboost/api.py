@@ -49,6 +49,11 @@ class NGBRegressor(NGBoost, BaseEstimator):
                                     loss has to increase before the algorithm stops early.
                                     Set to None to disable early stopping and validation.
                                     None enables running over the full data set.
+        fit_base_mode     : "separate" for the historical serial per-parameter fit,
+                            or "parallel_separate" to fit those same learners concurrently.
+        n_jobs_fit        : number of jobs for fit_base_mode="parallel_separate".
+        line_search_strategy: "standard" for the historical line search, or "capped"
+                              for a bounded loss-checked line search.
 
     Output:
         An NGBRegressor object that can be fit.
@@ -71,6 +76,11 @@ class NGBRegressor(NGBoost, BaseEstimator):
         random_state=None,
         validation_fraction=0.1,
         early_stopping_rounds=None,
+        fit_base_mode="separate",
+        n_jobs_fit=None,
+        line_search_strategy="standard",
+        line_search_max_up=2,
+        line_search_max_down=3,
     ):
         assert issubclass(
             Dist, RegressionDistn
@@ -96,6 +106,11 @@ class NGBRegressor(NGBoost, BaseEstimator):
             random_state,
             validation_fraction,
             early_stopping_rounds,
+            fit_base_mode,
+            n_jobs_fit,
+            line_search_strategy,
+            line_search_max_up,
+            line_search_max_down,
         )
 
         self._estimator_type = "regressor"
@@ -158,6 +173,11 @@ class NGBClassifier(NGBoost, BaseEstimator):
         verbose_eval=100,
         tol=1e-4,
         random_state=None,
+        fit_base_mode="separate",
+        n_jobs_fit=None,
+        line_search_strategy="standard",
+        line_search_max_up=2,
+        line_search_max_down=3,
     ):
         assert issubclass(
             Dist, ClassificationDistn
@@ -175,6 +195,11 @@ class NGBClassifier(NGBoost, BaseEstimator):
             verbose_eval,
             tol,
             random_state,
+            fit_base_mode=fit_base_mode,
+            n_jobs_fit=n_jobs_fit,
+            line_search_strategy=line_search_strategy,
+            line_search_max_up=line_search_max_up,
+            line_search_max_down=line_search_max_down,
         )
         self._estimator_type = "classifier"
 
@@ -252,6 +277,11 @@ class NGBSurvival(NGBoost, BaseEstimator):
         verbose_eval=100,
         tol=1e-4,
         random_state=None,
+        fit_base_mode="separate",
+        n_jobs_fit=None,
+        line_search_strategy="standard",
+        line_search_max_up=2,
+        line_search_max_down=3,
     ):
 
         assert issubclass(
@@ -278,6 +308,11 @@ class NGBSurvival(NGBoost, BaseEstimator):
             verbose_eval,
             tol,
             random_state,
+            fit_base_mode=fit_base_mode,
+            n_jobs_fit=n_jobs_fit,
+            line_search_strategy=line_search_strategy,
+            line_search_max_up=line_search_max_up,
+            line_search_max_down=line_search_max_down,
         )
 
     def __getstate__(self):
@@ -294,6 +329,11 @@ class NGBSurvival(NGBoost, BaseEstimator):
         state_dict["Dist"] = SurvivalDistnClass(state_dict["_basedist"])
         del state_dict["_basedist"]
         state_dict["Manifold"] = manifold(state_dict["Score"], state_dict["Dist"])
+        state_dict.setdefault("fit_base_mode", "separate")
+        state_dict.setdefault("n_jobs_fit", None)
+        state_dict.setdefault("line_search_strategy", "standard")
+        state_dict.setdefault("line_search_max_up", 2)
+        state_dict.setdefault("line_search_max_down", 3)
         self.__dict__ = state_dict
 
     # pylint: disable=too-many-positional-arguments
