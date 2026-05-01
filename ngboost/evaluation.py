@@ -1,7 +1,10 @@
 import numpy as np
 from lifelines import KaplanMeierFitter
+from lifelines.utils.concordance import (
+    _concordance_ratio,
+    _concordance_summary_statistics,
+)
 from matplotlib import pyplot as plt
-from tqdm import tqdm
 
 
 def calibration_regression(Forecast, Y, bins=11, eps=1e-3):
@@ -94,20 +97,67 @@ def calculate_concordance_naive(preds, Y, E):
     - (c=1, c=0): can compare if true censored time > true uncensored time
     - (c=1, c=1): both censored, cannot compare
     """
-    trues = Y
-    concordance, N = 0, len(trues)
-    counter = 0
-    for i in tqdm(range(N)):
-        for j in range(i + 1, N):
-            cond_1 = E[i] and E[j]
-            cond_2 = E[i] and not E[j] and Y[i] < Y[j]
-            cond_3 = not E[i] and E[j] and Y[i] > Y[j]
-            if cond_1 or cond_2 or cond_3:
-                if (preds[i] < preds[j] and trues[i] < trues[j]) or (
-                    preds[i] > preds[j] and trues[i] > trues[j]
-                ):
-                    concordance += 1
-                elif preds[i] == preds[j]:
-                    concordance += 0.5
-                counter += 1
-    return concordance / counter
+    event_mask = np.asarray(E, dtype=bool)
+    times = np.asarray(Y)
+    predictions = np.asarray(preds)
+    concordant, tied_pred, admissible = _concordance_summary_statistics(
+        times, predictions, event_mask
+    )
+
+    event_times = times[event_mask]
+    event_preds = predictions[event_mask]
+    censored_times = times[~event_mask]
+    censored_preds = predictions[~event_mask]
+
+    _, event_counts = np.unique(event_times, return_counts=True)
+    admissible += np.sum(event_counts * (event_counts - 1) // 2)
+
+    if len(event_times) > 0:
+        event_pairs = np.rec.fromarrays([event_times, event_preds])
+        _, event_pair_counts = np.unique(event_pairs, return_counts=True)
+        tied_pred += np.sum(event_pair_counts * (event_pair_counts - 1) // 2)
+
+    event_order = np.lexsort((event_preds, event_times))
+    censored_order = np.lexsort((censored_preds, censored_times))
+    sorted_event_times = event_times[event_order]
+    sorted_event_preds = event_preds[event_order]
+    sorted_censored_times = censored_times[censored_order]
+    sorted_censored_preds = censored_preds[censored_order]
+
+    event_start = censored_start = 0
+    while event_start < len(sorted_event_times) and censored_start < len(
+        sorted_censored_times
+    ):
+        event_time = sorted_event_times[event_start]
+        censored_time = sorted_censored_times[censored_start]
+        if event_time < censored_time:
+            event_start = np.searchsorted(sorted_event_times, event_time, side="right")
+            continue
+        if censored_time < event_time:
+            censored_start = np.searchsorted(
+                sorted_censored_times, censored_time, side="right"
+            )
+            continue
+
+        event_stop = np.searchsorted(sorted_event_times, event_time, side="right")
+        censored_stop = np.searchsorted(
+            sorted_censored_times, censored_time, side="right"
+        )
+        same_time_event_preds = sorted_event_preds[event_start:event_stop]
+        same_time_censored_preds = sorted_censored_preds[censored_start:censored_stop]
+        admissible -= len(same_time_event_preds) * len(same_time_censored_preds)
+        concordant -= np.searchsorted(
+            same_time_event_preds, same_time_censored_preds, side="left"
+        ).sum()
+        tied_pred -= (
+            np.searchsorted(
+                same_time_event_preds, same_time_censored_preds, side="right"
+            )
+            - np.searchsorted(
+                same_time_event_preds, same_time_censored_preds, side="left"
+            )
+        ).sum()
+        event_start = event_stop
+        censored_start = censored_stop
+
+    return _concordance_ratio(concordant, tied_pred, admissible)

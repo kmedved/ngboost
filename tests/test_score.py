@@ -50,6 +50,28 @@ def sample_metric(manifold_obj, n_mc_samples=1000):
     return np.mean(np.einsum("sik,sij->sijk", grads, grads), axis=0)
 
 
+class ToyLogScore(LogScore):
+    def __init__(self):
+        self.samples = [
+            np.array([1.0, 2.0, 3.0]),
+            np.array([2.0, 3.0, 4.0]),
+        ]
+
+    def sample(self, n_mc_samples):
+        return self.samples[:n_mc_samples]
+
+    def d_score(self, Y):
+        return np.column_stack([Y, Y + 1.0])
+
+
+def test_logscore_metric_matches_stacked_metric_without_stacking_samples():
+    score = ToyLogScore()
+    grads = np.stack([score.d_score(Y) for Y in score.sample(2)])
+    expected = np.mean(np.einsum("sik,sij->sijk", grads, grads), axis=0)
+
+    np.testing.assert_allclose(score.metric(n_mc_samples=2), expected)
+
+
 def estimate_grad_err(params: np.ndarray, manifold_test):
     """
     Args:

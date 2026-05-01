@@ -89,8 +89,12 @@ class LogScore(Score):
     """
 
     def metric(self, n_mc_samples=100):
-        grads = np.stack([self.d_score(Y) for Y in self.sample(n_mc_samples)])
-        return np.mean(np.einsum("sik,sij->sijk", grads, grads), axis=0)
+        metric = None
+        for Y in self.sample(n_mc_samples):
+            grad = self.d_score(Y)
+            sample_metric = np.einsum("ik,ij->ijk", grad, grad)
+            metric = sample_metric if metric is None else metric + sample_metric
+        return metric / n_mc_samples
 
     # autofit method from d_score?
 
