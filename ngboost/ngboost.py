@@ -52,7 +52,8 @@ class NGBoost:
                             per-parameter learners concurrently.
         n_jobs_fit        : number of jobs to use when fit_base_mode="parallel_separate".
         line_search_strategy: "standard" preserves the historical full line search.
-                              "capped" uses a bounded loss-checked line search.
+                              "loss_checked_capped" uses a bounded, loss-checked
+                              shortcut. "capped" is accepted as an alias.
 
 
     Output:
@@ -105,7 +106,9 @@ class NGBoost:
         self.early_stopping_rounds = early_stopping_rounds
         self.fit_base_mode = fit_base_mode
         self.n_jobs_fit = n_jobs_fit
-        self.line_search_strategy = line_search_strategy
+        self.line_search_strategy = self._normalize_line_search_strategy(
+            line_search_strategy
+        )
         self.line_search_max_up = line_search_max_up
         self.line_search_max_down = line_search_max_down
 
@@ -140,7 +143,9 @@ class NGBoost:
         state_dict["Manifold"] = manifold(state_dict["Score"], state_dict["Dist"])
         state_dict.setdefault("fit_base_mode", "separate")
         state_dict.setdefault("n_jobs_fit", None)
-        state_dict.setdefault("line_search_strategy", "standard")
+        state_dict["line_search_strategy"] = self._normalize_line_search_strategy(
+            state_dict.setdefault("line_search_strategy", "standard")
+        )
         state_dict.setdefault("line_search_max_up", 2)
         state_dict.setdefault("line_search_max_down", 3)
         self.__dict__ = state_dict
@@ -198,11 +203,30 @@ class NGBoost:
                 "fit_base_mode must be one of {'separate', 'parallel_separate'}"
             )
 
+    @staticmethod
+    def _normalize_line_search_strategy(strategy):
+        if strategy == "capped":
+            return "loss_checked_capped"
+        return strategy
+
+    @staticmethod
+    def _validate_nonnegative_int(value, name):
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"{name} must be a nonnegative integer")
+
     def _validate_line_search_strategy(self):
-        if self.line_search_strategy not in ("standard", "capped"):
+        self.line_search_strategy = self._normalize_line_search_strategy(
+            self.line_search_strategy
+        )
+        if self.line_search_strategy not in ("standard", "loss_checked_capped"):
             raise ValueError(
-                "line_search_strategy must be one of {'standard', 'capped'}"
+                "line_search_strategy must be one of "
+                "{'standard', 'loss_checked_capped'}; 'capped' is accepted as an alias"
             )
+        self._validate_nonnegative_int(self.line_search_max_up, "line_search_max_up")
+        self._validate_nonnegative_int(
+            self.line_search_max_down, "line_search_max_down"
+        )
 
     def _fit_one_base_model(self, X, grad, sample_weight=None):
         model = clone(self.Base)
@@ -236,7 +260,7 @@ class NGBoost:
     # pylint: disable=too-many-positional-arguments
     def line_search(self, resids, start, Y, sample_weight=None, scale_init=1):
         self._validate_line_search_strategy()
-        if self.line_search_strategy == "capped":
+        if self.line_search_strategy == "loss_checked_capped":
             return self._capped_line_search(
                 resids,
                 start,
@@ -644,6 +668,7 @@ class NGBoost:
             "minibatch_frac": self.minibatch_frac,
             "col_sample": self.col_sample,
             "verbose": self.verbose,
+            "verbose_eval": self.verbose_eval,
             "random_state": self.random_state,
             "validation_fraction": self.validation_fraction,
             "early_stopping_rounds": self.early_stopping_rounds,

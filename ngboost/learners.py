@@ -18,11 +18,11 @@ default_linear_learner = Ridge(alpha=0.0, random_state=None)
 
 
 class LightGBMTreeLearner(BaseEstimator, RegressorMixin):
-    """Optional one-tree LightGBM base learner for NGBoost.
+    """Optional non-equivalent one-tree LightGBM base learner for NGBoost.
 
-    This wrapper keeps LightGBM as an optional dependency. It is intended to be
-    passed explicitly as ``Base=LightGBMTreeLearner(...)``; NGBoost defaults
-    remain unchanged.
+    This wrapper keeps LightGBM as an optional dependency. It changes base-tree
+    construction semantics and is intended to be passed explicitly as
+    ``Base=LightGBMTreeLearner(...)``; NGBoost defaults remain unchanged.
     """
 
     def __init__(

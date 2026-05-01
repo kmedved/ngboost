@@ -52,8 +52,9 @@ class NGBRegressor(NGBoost, BaseEstimator):
         fit_base_mode     : "separate" for the historical serial per-parameter fit,
                             or "parallel_separate" to fit those same learners concurrently.
         n_jobs_fit        : number of jobs for fit_base_mode="parallel_separate".
-        line_search_strategy: "standard" for the historical line search, or "capped"
-                              for a bounded loss-checked line search.
+        line_search_strategy: "standard" for the historical line search, or
+                              "loss_checked_capped" for a bounded, loss-checked
+                              shortcut. "capped" is accepted as an alias.
 
     Output:
         An NGBRegressor object that can be fit.
@@ -154,6 +155,18 @@ class NGBClassifier(NGBoost, BaseEstimator):
         tol               : numerical tolerance to be used in optimization
         random_state      : seed for reproducibility. See
                             https://stackoverflow.com/questions/28064634/random-state-pseudo-random-number-in-scikit-learn
+        validation_fraction: Proportion of training data to set
+                             aside as validation data for early stopping.
+        early_stopping_rounds:      The number of consecutive boosting iterations during which the
+                                    loss has to increase before the algorithm stops early.
+                                    Set to None to disable early stopping and validation.
+                                    None enables running over the full data set.
+        fit_base_mode     : "separate" for the historical serial per-parameter fit,
+                            or "parallel_separate" to fit those same learners concurrently.
+        n_jobs_fit        : number of jobs for fit_base_mode="parallel_separate".
+        line_search_strategy: "standard" for the historical line search, or
+                              "loss_checked_capped" for a bounded, loss-checked
+                              shortcut. "capped" is accepted as an alias.
     Output:
         An NGBClassifier object that can be fit.
     """
@@ -173,6 +186,8 @@ class NGBClassifier(NGBoost, BaseEstimator):
         verbose_eval=100,
         tol=1e-4,
         random_state=None,
+        validation_fraction=0.1,
+        early_stopping_rounds=None,
         fit_base_mode="separate",
         n_jobs_fit=None,
         line_search_strategy="standard",
@@ -195,6 +210,8 @@ class NGBClassifier(NGBoost, BaseEstimator):
             verbose_eval,
             tol,
             random_state,
+            validation_fraction,
+            early_stopping_rounds,
             fit_base_mode=fit_base_mode,
             n_jobs_fit=n_jobs_fit,
             line_search_strategy=line_search_strategy,
@@ -258,6 +275,18 @@ class NGBSurvival(NGBoost, BaseEstimator):
         tol               : numerical tolerance to be used in optimization
         random_state      : seed for reproducibility. See
                             https://stackoverflow.com/questions/28064634/random-state-pseudo-random-number-in-scikit-learn
+        validation_fraction: Proportion of training data to set
+                             aside as validation data for early stopping.
+        early_stopping_rounds:      The number of consecutive boosting iterations during which the
+                                    loss has to increase before the algorithm stops early.
+                                    Set to None to disable early stopping and validation.
+                                    None enables running over the full data set.
+        fit_base_mode     : "separate" for the historical serial per-parameter fit,
+                            or "parallel_separate" to fit those same learners concurrently.
+        n_jobs_fit        : number of jobs for fit_base_mode="parallel_separate".
+        line_search_strategy: "standard" for the historical line search, or
+                              "loss_checked_capped" for a bounded, loss-checked
+                              shortcut. "capped" is accepted as an alias.
     Output:
         An NGBSurvival object that can be fit.
     """
@@ -277,6 +306,8 @@ class NGBSurvival(NGBoost, BaseEstimator):
         verbose_eval=100,
         tol=1e-4,
         random_state=None,
+        validation_fraction=0.1,
+        early_stopping_rounds=None,
         fit_base_mode="separate",
         n_jobs_fit=None,
         line_search_strategy="standard",
@@ -308,6 +339,8 @@ class NGBSurvival(NGBoost, BaseEstimator):
             verbose_eval,
             tol,
             random_state,
+            validation_fraction,
+            early_stopping_rounds,
             fit_base_mode=fit_base_mode,
             n_jobs_fit=n_jobs_fit,
             line_search_strategy=line_search_strategy,
@@ -329,12 +362,21 @@ class NGBSurvival(NGBoost, BaseEstimator):
         state_dict["Dist"] = SurvivalDistnClass(state_dict["_basedist"])
         del state_dict["_basedist"]
         state_dict["Manifold"] = manifold(state_dict["Score"], state_dict["Dist"])
+        state_dict.setdefault("validation_fraction", 0.1)
+        state_dict.setdefault("early_stopping_rounds", None)
         state_dict.setdefault("fit_base_mode", "separate")
         state_dict.setdefault("n_jobs_fit", None)
-        state_dict.setdefault("line_search_strategy", "standard")
+        state_dict["line_search_strategy"] = NGBoost._normalize_line_search_strategy(
+            state_dict.setdefault("line_search_strategy", "standard")
+        )
         state_dict.setdefault("line_search_max_up", 2)
         state_dict.setdefault("line_search_max_down", 3)
         self.__dict__ = state_dict
+
+    def get_params(self, deep=True):
+        params = super().get_params(deep=deep)
+        params["Dist"] = self.Dist._basedist
+        return params
 
     # pylint: disable=too-many-positional-arguments
     def fit(self, X, T, E, X_val=None, T_val=None, E_val=None, **kwargs):
