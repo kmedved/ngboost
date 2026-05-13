@@ -1,8 +1,10 @@
+import builtins
 import inspect
 import pickle
 
 import numpy as np
 import pytest
+import scipy.sparse
 import scipy.stats
 from sklearn.base import clone
 from sklearn.tree import DecisionTreeRegressor
@@ -67,6 +69,42 @@ def test_capped_line_search_alias_canonicalizes_to_loss_checked_capped():
 
     assert model.line_search_strategy == "loss_checked_capped"
     assert model.get_params()["line_search_strategy"] == "loss_checked_capped"
+
+
+def test_set_params_canonicalizes_validates_and_rebuilds_manifold():
+    model = NGBRegressor(random_state=0, verbose=False)
+
+    model.set_params(
+        line_search_strategy="capped",
+        line_search_max_up=np.int64(0),
+        line_search_max_down=np.int64(1),
+    )
+
+    assert model.line_search_strategy == "loss_checked_capped"
+    assert model.line_search_max_up == 0
+    assert model.line_search_max_down == 1
+    assert model.get_params()["random_state"] == 0
+
+    mvn2 = MultivariateNormal(2)
+    model.set_params(Dist=mvn2)
+    assert model.Dist is mvn2
+    assert model.Manifold.n_params == mvn2.n_params
+    assert model.multi_output is True
+
+    with pytest.raises(ValueError, match="Invalid parameter"):
+        model.set_params(not_a_real_param=1)
+    with pytest.raises(ValueError, match="line_search_strategy"):
+        model.set_params(line_search_strategy="fast")
+    with pytest.raises(ValueError, match="nonnegative integer"):
+        model.set_params(line_search_max_up=-1)
+
+
+def test_survival_set_params_wraps_base_distribution():
+    model = NGBSurvival(verbose=False)
+    model.set_params(Dist=model.get_params()["Dist"], line_search_strategy="capped")
+
+    assert model.get_params()["Dist"].__name__ == "LogNormal"
+    assert model.line_search_strategy == "loss_checked_capped"
 
 
 @pytest.mark.parametrize("bad_strategy", ["fast", "", None])
@@ -232,6 +270,90 @@ def test_parallel_separate_matches_serial_with_sampling_weights_and_validation()
     _assert_models_equivalent(serial, parallel, x[:20])
 
 
+def test_parallel_separate_matches_serial_with_sparse_input():
+    x, y = _make_regression_data(1, seed=17)
+    x_sparse = scipy.sparse.csr_matrix(x)
+    base = DecisionTreeRegressor(max_depth=2, random_state=0)
+    common = dict(
+        Dist=Normal,
+        Base=base,
+        n_estimators=4,
+        learning_rate=0.05,
+        random_state=0,
+        verbose=False,
+    )
+    serial = NGBRegressor(**common, fit_base_mode="separate")
+    parallel = NGBRegressor(**common, fit_base_mode="parallel_separate", n_jobs_fit=2)
+
+    serial.fit(x_sparse, y)
+    parallel.fit(x_sparse, y)
+
+    _assert_models_equivalent(serial, parallel, x_sparse[:20])
+
+
+def test_parallel_separate_matches_serial_classifier_fit():
+    rng = np.random.RandomState(23)
+    x = rng.randn(120, 5)
+    y = (x[:, 0] + 0.25 * rng.randn(120) > 0).astype(int)
+    base = DecisionTreeRegressor(max_depth=2, random_state=0)
+    common = dict(
+        Base=base,
+        n_estimators=5,
+        learning_rate=0.05,
+        random_state=0,
+        verbose=False,
+    )
+    serial = NGBClassifier(**common, fit_base_mode="separate")
+    parallel = NGBClassifier(**common, fit_base_mode="parallel_separate", n_jobs_fit=2)
+
+    serial.fit(x, y)
+    parallel.fit(x, y)
+
+    _assert_models_equivalent(serial, parallel, x[:20])
+    np.testing.assert_allclose(
+        serial.predict_proba(x[:20]),
+        parallel.predict_proba(x[:20]),
+        atol=1e-12,
+    )
+
+
+def test_parallel_separate_matches_serial_survival_fit_with_validation():
+    rng = np.random.RandomState(29)
+    x = rng.randn(140, 5)
+    durations = np.exp(0.2 * x[:, 0] + rng.randn(140) * 0.1)
+    events = rng.binomial(1, 0.8, size=140).astype(bool)
+    base = DecisionTreeRegressor(max_depth=2, random_state=0)
+    common = dict(
+        Base=base,
+        n_estimators=5,
+        learning_rate=0.05,
+        random_state=0,
+        verbose=False,
+        early_stopping_rounds=2,
+    )
+    serial = NGBSurvival(**common, fit_base_mode="separate")
+    parallel = NGBSurvival(**common, fit_base_mode="parallel_separate", n_jobs_fit=2)
+
+    serial.fit(
+        x[:100],
+        durations[:100],
+        events[:100],
+        X_val=x[100:],
+        T_val=durations[100:],
+        E_val=events[100:],
+    )
+    parallel.fit(
+        x[:100],
+        durations[:100],
+        events[:100],
+        X_val=x[100:],
+        T_val=durations[100:],
+        E_val=events[100:],
+    )
+
+    _assert_models_equivalent(serial, parallel, x[:20])
+
+
 def test_loss_checked_line_search_never_returns_increasing_step():
     class DummyManifold:
         def __init__(self, params):
@@ -308,9 +430,64 @@ def test_lightgbm_tree_learner_is_optional_non_equivalent_backend():
         line_search_strategy="loss_checked_capped",
         verbose=False,
     )
+    cloned_model = clone(model)
 
     model.fit(x, y, sample_weight=sample_weight)
 
     assert model.predict(x[:5]).shape == (5,)
     assert len(model.base_models) == 3
     assert model.get_params()["line_search_strategy"] == "loss_checked_capped"
+    assert cloned_model.get_params()["Base"].max_depth == learner.max_depth
+
+
+def test_lightgbm_tree_learner_missing_dependency_message(monkeypatch):
+    rng = np.random.RandomState(31)
+    x = rng.randn(10, 2)
+    y = rng.randn(10)
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "lightgbm":
+            raise ImportError("blocked for test")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    with pytest.raises(ImportError, match="requires lightgbm"):
+        LightGBMTreeLearner().fit(x, y)
+
+
+def test_benchmark_registry_names_public_speed_paths():
+    from benchmarks.variants import (
+        BackendStatus,
+        BENCH_N_THREADS,
+        get_bigk_experiments,
+        get_univariate_experiments,
+    )
+
+    backend_statuses = {"lightgbm": BackendStatus("lightgbm", True)}
+    uni_specs = {
+        spec.name: spec
+        for spec in get_univariate_experiments(
+            "full", backend_statuses=backend_statuses
+        )
+    }
+    bigk_specs = {
+        spec.name: spec
+        for spec in get_bigk_experiments("full", backend_statuses=backend_statuses)
+    }
+
+    assert uni_specs["PublicParallelSeparate"].extra_kwargs == {
+        "fit_base_mode": "parallel_separate",
+        "n_jobs_fit": BENCH_N_THREADS,
+    }
+    assert (
+        uni_specs["PublicLightGBMTreeLearner+CappedLS"].extra_kwargs[
+            "line_search_strategy"
+        ]
+        == "loss_checked_capped"
+    )
+    assert bigk_specs["BigK:PublicParallelSeparate"].extra_kwargs == {
+        "fit_base_mode": "parallel_separate",
+        "n_jobs_fit": BENCH_N_THREADS,
+    }

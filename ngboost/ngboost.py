@@ -4,6 +4,8 @@
 # pylint: disable=unused-argument,too-many-locals,too-many-branches,too-many-statements
 # pylint: disable=unused-variable,invalid-unary-operand-type,attribute-defined-outside-init
 # pylint: disable=redundant-keyword-arg,protected-access,unnecessary-lambda-assignment
+import numbers
+
 import numpy as np
 from joblib import Parallel, delayed
 from sklearn.base import clone
@@ -86,7 +88,7 @@ class NGBoost:
         self.Dist = Dist
         self.Score = Score
         self.Base = Base
-        self.Manifold = manifold(Score, Dist)
+        self._refresh_manifold()
         self.natural_gradient = natural_gradient
         self.n_estimators = n_estimators
         self.learning_rate = learning_rate
@@ -100,7 +102,8 @@ class NGBoost:
         self.scalings = []
         self.col_idxs = []
         self.tol = tol
-        self.random_state = check_random_state(random_state)
+        self.random_state = random_state
+        self._random_state = check_random_state(random_state)
         self.best_val_loss_itr = None
         self.validation_fraction = validation_fraction
         self.early_stopping_rounds = early_stopping_rounds
@@ -112,13 +115,12 @@ class NGBoost:
         self.line_search_max_up = line_search_max_up
         self.line_search_max_down = line_search_max_down
 
-        if hasattr(self.Dist, "multi_output"):
-            self.multi_output = self.Dist.multi_output
-        else:
-            self.multi_output = False
-
         self._validate_fit_base_mode()
         self._validate_line_search_strategy()
+
+    def _refresh_manifold(self):
+        self.Manifold = manifold(self.Score, self.Dist)
+        self.multi_output = getattr(self.Dist, "multi_output", False)
 
     def __getstate__(self):
         state = self.__dict__.copy()
@@ -141,6 +143,11 @@ class NGBoost:
                 state_dict["K"]
             )
         state_dict["Manifold"] = manifold(state_dict["Score"], state_dict["Dist"])
+        state_dict.setdefault("random_state", None)
+        state_dict["_random_state"] = check_random_state(
+            state_dict.get("_random_state", state_dict["random_state"])
+        )
+        state_dict["multi_output"] = getattr(state_dict["Dist"], "multi_output", False)
         state_dict.setdefault("fit_base_mode", "separate")
         state_dict.setdefault("n_jobs_fit", None)
         state_dict["line_search_strategy"] = self._normalize_line_search_strategy(
@@ -173,7 +180,7 @@ class NGBoost:
 
         if self.minibatch_frac != 1.0:
             sample_size = int(self.minibatch_frac * len(Y))
-            idxs = self.random_state.choice(
+            idxs = self._random_state.choice(
                 np.arange(len(Y)), sample_size, replace=False
             )
 
@@ -182,7 +189,7 @@ class NGBoost:
                 col_size = max(1, int(self.col_sample * X.shape[1]))
             else:
                 col_size = 0
-            col_idx = self.random_state.choice(
+            col_idx = self._random_state.choice(
                 np.arange(X.shape[1]), col_size, replace=False
             )
 
@@ -211,8 +218,13 @@ class NGBoost:
 
     @staticmethod
     def _validate_nonnegative_int(value, name):
-        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, numbers.Integral)
+            or value < 0
+        ):
             raise ValueError(f"{name} must be a nonnegative integer")
+        return int(value)
 
     def _validate_line_search_strategy(self):
         self.line_search_strategy = self._normalize_line_search_strategy(
@@ -223,8 +235,10 @@ class NGBoost:
                 "line_search_strategy must be one of "
                 "{'standard', 'loss_checked_capped'}; 'capped' is accepted as an alias"
             )
-        self._validate_nonnegative_int(self.line_search_max_up, "line_search_max_up")
-        self._validate_nonnegative_int(
+        self.line_search_max_up = self._validate_nonnegative_int(
+            self.line_search_max_up, "line_search_max_up"
+        )
+        self.line_search_max_down = self._validate_nonnegative_int(
             self.line_search_max_down, "line_search_max_down"
         )
 
@@ -490,7 +504,7 @@ class NGBoost:
                         X,
                         Y,
                         test_size=self.validation_fraction,
-                        random_state=self.random_state,
+                        random_state=self._random_state,
                     )
 
                 else:
@@ -509,7 +523,7 @@ class NGBoost:
                         Y,
                         sample_weight,
                         test_size=self.validation_fraction,
-                        random_state=self.random_state,
+                        random_state=self._random_state,
                     )
             elif X_val is not None and Y_val is not None:
                 if sample_weight is not None and val_sample_weight is None:
@@ -645,8 +659,35 @@ class NGBoost:
         return self
 
     def set_params(self, **parameters):
-        for parameter, value in parameters.items():
-            setattr(self, parameter, value)
+        if not parameters:
+            return self
+
+        valid_params = self.get_params(deep=True)
+        invalid_params = sorted(set(parameters) - set(valid_params))
+        if invalid_params:
+            raise ValueError(
+                "Invalid parameter(s) for NGBoost estimator: "
+                f"{invalid_params}. Valid parameters are: {sorted(valid_params)}"
+            )
+
+        previous_state = self.__dict__.copy()
+        try:
+            for parameter, value in parameters.items():
+                if parameter == "line_search_strategy":
+                    value = self._normalize_line_search_strategy(value)
+                setattr(self, parameter, value)
+
+            if "random_state" in parameters:
+                self._random_state = check_random_state(self.random_state)
+            if "Dist" in parameters or "Score" in parameters:
+                self._refresh_manifold()
+
+            self._validate_fit_base_mode()
+            self._validate_line_search_strategy()
+        except Exception:
+            self.__dict__.clear()
+            self.__dict__.update(previous_state)
+            raise
         return self
 
     def get_params(self, deep=True):

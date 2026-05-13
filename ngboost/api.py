@@ -1,7 +1,7 @@
 "The NGBoost library API"
 # pylint: disable=too-many-arguments
 from sklearn.base import BaseEstimator
-from sklearn.utils import check_array
+from sklearn.utils import check_array, check_random_state
 
 from ngboost.distns import (
     Bernoulli,
@@ -364,6 +364,11 @@ class NGBSurvival(NGBoost, BaseEstimator):
         state_dict["Manifold"] = manifold(state_dict["Score"], state_dict["Dist"])
         state_dict.setdefault("validation_fraction", 0.1)
         state_dict.setdefault("early_stopping_rounds", None)
+        state_dict.setdefault("random_state", None)
+        state_dict["_random_state"] = check_random_state(
+            state_dict.get("_random_state", state_dict["random_state"])
+        )
+        state_dict["multi_output"] = getattr(state_dict["Dist"], "multi_output", False)
         state_dict.setdefault("fit_base_mode", "separate")
         state_dict.setdefault("n_jobs_fit", None)
         state_dict["line_search_strategy"] = NGBoost._normalize_line_search_strategy(
@@ -377,6 +382,18 @@ class NGBSurvival(NGBoost, BaseEstimator):
         params = super().get_params(deep=deep)
         params["Dist"] = self.Dist._basedist
         return params
+
+    def set_params(self, **parameters):
+        if "Dist" in parameters:
+            basedist = parameters["Dist"]
+            if not hasattr(basedist, "censored_scores"):
+                raise ValueError(
+                    f"The {basedist.__name__} distribution does not have any "
+                    "censored scores implemented."
+                )
+            parameters = dict(parameters)
+            parameters["Dist"] = SurvivalDistnClass(basedist)
+        return super().set_params(**parameters)
 
     # pylint: disable=too-many-positional-arguments
     def fit(self, X, T, E, X_val=None, T_val=None, E_val=None, **kwargs):

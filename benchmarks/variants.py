@@ -19,9 +19,11 @@ from sklearn.utils.validation import check_array, check_consistent_length
 from ngboost import NGBRegressor
 from ngboost.distns import MultivariateNormal, Normal
 from ngboost.distns.distn import RegressionDistn
+from ngboost.learners import LightGBMTreeLearner
 from ngboost.scores import LogScore
 
 GLOBAL_SEED = 42
+BENCH_N_THREADS = int(os.environ.get("OMP_NUM_THREADS", "4"))
 np.random.seed(GLOBAL_SEED)
 
 
@@ -1896,6 +1898,13 @@ class PreBinnedNumbaNGBRegressor(FastMO_FixedStepNGBRegressor):
 
 
 DEFAULT_BASE = DecisionTreeRegressor(max_depth=3, random_state=GLOBAL_SEED)
+PUBLIC_LIGHTGBM_BASE = LightGBMTreeLearner(
+    max_depth=3,
+    num_leaves=31,
+    min_child_samples=1,
+    random_state=GLOBAL_SEED,
+    n_jobs=BENCH_N_THREADS,
+)
 HIST_BASE = HistGradientBoostingRegressor(
     max_iter=1,
     learning_rate=1.0,
@@ -1923,6 +1932,11 @@ HYPER_CONFIGS = [
 
 UNI_EXPERIMENTS = [
     ("Baseline", NGBRegressor, {}),
+    (
+        "PublicParallelSeparate",
+        NGBRegressor,
+        {"fit_base_mode": "parallel_separate", "n_jobs_fit": BENCH_N_THREADS},
+    ),
     ("FN:Baseline", NGBRegressor, {"Dist": FastNormal, "Score": FastNormalLogScore}),
     ("Baseline (NoNatGrad)", NGBRegressor, {"natural_gradient": False}),
     ("Baseline+DiagNG", DiagonalNGBRegressor, {}),
@@ -1981,6 +1995,15 @@ UNI_EXPERIMENTS = [
     ("MO+ArmijoLS", FastMO_ArmijoLSNGBRegressor, {}),
     ("HistBase", NGBRegressor, {"Base": HIST_BASE}),
     ("HistBase+FixedStep", FixedStepNGBRegressor, {"Base": HIST_BASE}),
+    (
+        "PublicLightGBMTreeLearner+CappedLS",
+        NGBRegressor,
+        {
+            "Base": PUBLIC_LIGHTGBM_BASE,
+            "line_search_strategy": "loss_checked_capped",
+        },
+        "lightgbm",
+    ),
     ("XGB+MO+FixedStep", FastMO_FixedStepNGBRegressor, {"Base": XGB_BASE}, "xgboost"),
     ("LightGBM+FixedStep", LightGBM_FixedStepNGBRegressor, {}, "lightgbm"),
     ("LightGBM+CappedLS", LightGBM_CappedLSNGBRegressor, {}, "lightgbm"),
@@ -1995,6 +2018,11 @@ UNI_EXPERIMENTS = [
 
 BIGK_EXPERIMENTS = [
     ("BigK:Baseline", NGBRegressor, {}),
+    (
+        "BigK:PublicParallelSeparate",
+        NGBRegressor,
+        {"fit_base_mode": "parallel_separate", "n_jobs_fit": BENCH_N_THREADS},
+    ),
     ("BigK:NoCopy", NoCopyNGBRegressor, {}),
     ("BigK:CappedLS", CappedLSNGBRegressor, {}),
     ("BigK:HybridLS", HybridLSNGBRegressor, {}),
@@ -2018,6 +2046,11 @@ BIGK_EXPERIMENTS = [
 
 SHORT_UNI_EXPERIMENTS = [
     ("Baseline", NGBRegressor, {}),
+    (
+        "PublicParallelSeparate",
+        NGBRegressor,
+        {"fit_base_mode": "parallel_separate", "n_jobs_fit": BENCH_N_THREADS},
+    ),
     ("FN:Baseline", NGBRegressor, {"Dist": FastNormal, "Score": FastNormalLogScore}),
     ("MO", FastMultiOutputNGBRegressor, {}),
     (
@@ -2045,6 +2078,15 @@ SHORT_UNI_EXPERIMENTS = [
         FastMO_DampedScale_ArmijoLSNGBRegressor,
         {"log_scale_clip": 0.0},
     ),
+    (
+        "PublicLightGBMTreeLearner+CappedLS",
+        NGBRegressor,
+        {
+            "Base": PUBLIC_LIGHTGBM_BASE,
+            "line_search_strategy": "loss_checked_capped",
+        },
+        "lightgbm",
+    ),
     ("LightGBM+FixedStep", LightGBM_FixedStepNGBRegressor, {}, "lightgbm"),
     ("LightGBM+CappedLS", LightGBM_CappedLSNGBRegressor, {}, "lightgbm"),
     ("PreBinnedNumba+FixedStep", PreBinnedNumbaNGBRegressor, {}, "numba"),
@@ -2058,6 +2100,11 @@ SHORT_UNI_EXPERIMENTS = [
 
 SHORT_BIGK_EXPERIMENTS = [
     ("BigK:Baseline", NGBRegressor, {}),
+    (
+        "BigK:PublicParallelSeparate",
+        NGBRegressor,
+        {"fit_base_mode": "parallel_separate", "n_jobs_fit": BENCH_N_THREADS},
+    ),
     ("BigK:MO", FastMultiOutputNGBRegressor, {}),
     ("BigK:MO+DiagNG", FastMO_DiagNGBRegressor, {}),
     ("BigK:MO+CappedLS", FastMO_CappedLSNGBRegressor, {}),
