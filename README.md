@@ -59,7 +59,11 @@ Details on available distributions, scoring rules, learners, tuning, and model i
 
 ## Benchmarks
 
-The repo includes a local benchmark suite under `benchmarks/` for comparing speed and predictive quality across NGBoost variants.
+The repo includes a local benchmark suite under `benchmarks/` for comparing speed and predictive quality across NGBoost variants. See:
+
+- [Benchmark suite and results](docs/benchmarking.md)
+- [Safe speed features and backend guidance](docs/speed-features.md)
+- [Benchmark package README](benchmarks/README.md)
 
 ```sh
 conda run -n darko311 python -m pip install poetry==2.0.1
@@ -78,6 +82,13 @@ make bench-extended
 ```
 
 `bench-extended` enables CaliforniaHousing and OpenML datasets, which require network access. You can also restrict runs with `--methods`, `--datasets`, or `--configs`.
+
+Current speed-feature guidance:
+
+- Use the historical default backend for ordinary univariate Normal regression.
+- Use `fit_base_mode="parallel_separate"` for high-parameter distributions, such as `MultivariateNormal(k)`, when the base learner is deterministic and thread-safe.
+- Treat `LightGBMTreeLearner` as an optional non-equivalent backend that needs dataset-specific validation.
+- Keep shared multi-output tree, fixed-step, and pre-binned custom-tree variants in benchmark-only code unless future evidence justifies promotion.
 
 For Colab-based benchmark testing, see [this notebook](https://colab.research.google.com/drive/1ZoXh8Y-SFuk93iM7yQWK_82a1g5t36Bj#scrollTo=mma8iKMqCCdl).
 
